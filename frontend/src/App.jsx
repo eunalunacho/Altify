@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import BlogEditor from './components/BlogEditor';
 import UploadForm from './components/UploadForm';
 import StatusDashboard from './components/StatusDashboard';
 import ReviewPanel from './components/ReviewPanel';
@@ -6,7 +7,12 @@ import ReviewPanel from './components/ReviewPanel';
 function App() {
   const [currentTask, setCurrentTask] = useState(null);
   const [uploadedImage, setUploadedImage] = useState(null);
-  const [view, setView] = useState('upload'); // 'upload', 'status', 'review'
+  const [view, setView] = useState('blog'); // 'blog', 'upload', 'status', 'review'
+
+  const handleBlogPublishSuccess = (tasks) => {
+    // 블로그 발행 성공 - BlogEditor에서 자체적으로 상태 관리하므로 여기서는 별도 처리 불필요
+    console.log('블로그 발행 완료:', tasks);
+  };
 
   const handleUploadSuccess = (taskData) => {
     setCurrentTask(taskData);
@@ -41,7 +47,7 @@ function App() {
   };
 
   const handleReset = () => {
-    setView('upload');
+    setView('blog');
     setCurrentTask(null);
     setUploadedImage(null);
   };
@@ -61,7 +67,7 @@ function App() {
             <p className="text-sm text-gray-600 hidden sm:block">
               시각 장애인을 위한 ALT 텍스트 생성 플랫폼
             </p>
-            {view !== 'upload' && (
+            {view !== 'blog' && (
               <button
                 onClick={handleReset}
                 className="px-4 py-2 text-primary-600 hover:text-primary-700 font-medium transition-colors"
@@ -75,6 +81,10 @@ function App() {
 
       {/* 메인 컨텐츠 */}
       <main className="py-8">
+        {view === 'blog' && (
+          <BlogEditor onPublishSuccess={handleBlogPublishSuccess} />
+        )}
+
         {view === 'upload' && (
           <UploadForm onUploadSuccess={handleUploadSuccess} />
         )}

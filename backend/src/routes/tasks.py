@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 import uuid
 import io
 import re
@@ -183,6 +183,172 @@ async def upload_task(
         raise HTTPException(
             status_code=500,
             detail=f"작업 업로드 중 오류 발생: {str(e)}"
+        )
+
+
+@router.post("/bulk-upload", response_model=List[TaskResponse], status_code=202)
+async def bulk_upload_tasks(
+    images: List[UploadFile] = File(...),
+    contexts: List[str] = Form(...),
+    db: Session = Depends(get_db)
+):
+    """
+    여러 이미지-문맥 쌍을 한 번에 업로드하는 엔드포인트
+    
+    Args:
+        images: 이미지 파일 리스트
+        contexts: 문맥 텍스트 리스트 (images와 1:1 매핑)
+        db: 데이터베이스 세션
+    
+    Returns:
+        생성된 Task 리스트
+    """
+    if len(images) != len(contexts):
+        raise HTTPException(
+            status_code=400,
+            detail="이미지와 문맥 텍스트의 개수가 일치하지 않습니다."
+        )
+    
+    if len(images) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="최소 하나의 이미지가 필요합니다."
+        )
+    
+    created_tasks = []
+    minio_client = None
+    uploaded_paths = []
+    
+    try:
+        minio_client = get_minio_client()
+        
+        # 각 이미지-문맥 쌍 처리
+        for idx, (image, context_text) in enumerate(zip(images, contexts)):
+            task = None
+            image_path = None
+            task_id = None
+            
+            try:
+                # 1. 문맥 텍스트 전처리
+                try:
+                    processed_text = preprocess_text(context_text)
+                except Exception as e:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"텍스트 전처리 실패 (인덱스 {idx}): {str(e)}"
+                    )
+                
+                # 2. 파일 데이터 읽기 및 객체 이름 생성
+                file_data = await image.read()
+                file_stream = io.BytesIO(file_data)
+                file_extension = image.filename.split('.')[-1] if '.' in image.filename else 'jpg'
+                object_name = f"{uuid.uuid4()}.{file_extension}"
+                
+                # 3. DB에 Task 객체 생성 및 flush (커밋 전)
+                try:
+                    task = Task(
+                        image_path="",  # 임시 값, MinIO 업로드 후 업데이트
+                        context_text=processed_text,
+                        status=TaskStatus.PENDING
+                    )
+                    db.add(task)
+                    db.flush()  # ID를 얻기 위해 flush
+                    task_id = task.id
+                except SQLAlchemyError as e:
+                    db.rollback()
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"데이터베이스 저장 실패 (인덱스 {idx}): {str(e)}"
+                    )
+                
+                # 4. MinIO에 이미지 업로드
+                try:
+                    image_path = upload_image_to_minio(
+                        minio_client,
+                        file_stream,
+                        object_name,
+                        bucket_name="alt-images"
+                    )
+                    task.image_path = image_path
+                    uploaded_paths.append(image_path)
+                    db.flush()  # 변경사항 flush
+                except Exception as e:
+                    db.rollback()
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"이미지 업로드 실패 (인덱스 {idx}): {str(e)}"
+                    )
+                
+                # 5. 커밋
+                try:
+                    db.commit()
+                except SQLAlchemyError as e:
+                    # 커밋 실패 시 MinIO 파일 삭제
+                    if minio_client and image_path:
+                        try:
+                            delete_image_from_minio(minio_client, image_path)
+                            uploaded_paths.remove(image_path)
+                        except Exception:
+                            pass
+                    db.rollback()
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"트랜잭션 커밋 실패 (인덱스 {idx}): {str(e)}"
+                    )
+                
+                # 6. RabbitMQ에 작업 ID 발행
+                try:
+                    publish_task_id(task_id, queue_name="alt_generation_queue")
+                except Exception as e:
+                    print(f"Warning: RabbitMQ 메시지 발행 실패 (task_id: {task_id}): {str(e)}")
+                
+                created_tasks.append(TaskResponse.model_validate(task))
+                
+            except HTTPException:
+                # HTTPException은 전파하고 이미 처리된 작업은 정리
+                # 실패한 작업 이후의 작업들은 처리하지 않음
+                raise
+            except Exception as e:
+                # 예상치 못한 오류
+                if minio_client and image_path:
+                    try:
+                        delete_image_from_minio(minio_client, image_path)
+                        if image_path in uploaded_paths:
+                            uploaded_paths.remove(image_path)
+                    except Exception:
+                        pass
+                
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"작업 업로드 중 오류 발생 (인덱스 {idx}): {str(e)}"
+                )
+        
+        return created_tasks
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        # 전체 실패 시 정리 작업
+        if minio_client:
+            for path in uploaded_paths:
+                try:
+                    delete_image_from_minio(minio_client, path)
+                except Exception:
+                    pass
+        
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        
+        raise HTTPException(
+            status_code=500,
+            detail=f"대량 업로드 중 오류 발생: {str(e)}"
         )
 
 
