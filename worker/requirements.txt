@@ -1,0 +1,10 @@
+torch>=2.0.0
+transformers>=4.35.0
+accelerate>=0.24.0
+bitsandbytes>=0.41.0
+aio-pika>=9.0.0
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.9
+minio>=7.2.0
+pillow>=10.0.0
+
