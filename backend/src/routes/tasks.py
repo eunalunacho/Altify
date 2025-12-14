@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from pydantic import BaseModel
 from typing import Optional, List
+from datetime import datetime
 import uuid
 import io
 import re
@@ -22,6 +23,11 @@ class TaskApproveRequest(BaseModel):
     final_alt: str
     is_approved: bool = True
 
+class TaskFinalizeItem(BaseModel):
+    """여러 Task를 한 번에 확정할 때 사용하는 스키마"""
+    task_id: int
+    selected_alt_index: int
+    final_alt: str
 
 def preprocess_text(text: str) -> str:
     """
@@ -368,6 +374,55 @@ async def get_task(task_id: int, db: Session = Depends(get_db)):
     if not task:
         raise HTTPException(status_code=404, detail="Task를 찾을 수 없습니다.")
     return TaskResponse.model_validate(task)
+
+@router.post("/finalize", response_model=List[TaskResponse])
+async def finalize_tasks(
+    requests: List[TaskFinalizeItem],
+    db: Session = Depends(get_db)
+):
+    """여러 Task의 최종 ALT 선택 및 저장"""
+
+    if not requests:
+        raise HTTPException(status_code=400, detail="최소 하나의 작업이 필요합니다.")
+
+    task_ids = [item.task_id for item in requests]
+    tasks = db.query(Task).filter(Task.id.in_(task_ids)).all()
+    task_map = {task.id: task for task in tasks}
+
+    # 유효성 검사
+    for item in requests:
+        if item.selected_alt_index not in (1, 2):
+            raise HTTPException(status_code=400, detail="선택된 ALT 번호는 1 또는 2여야 합니다.")
+
+        task = task_map.get(item.task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail=f"Task {item.task_id}를 찾을 수 없습니다.")
+
+        if task.status != TaskStatus.DONE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"ALT 생성이 완료된 작업만 확정할 수 있습니다. (task_id: {item.task_id})"
+            )
+
+    try:
+        for item in requests:
+            task = task_map[item.task_id]
+            task.final_alt = item.final_alt.strip()
+            task.selected_alt_index = item.selected_alt_index
+            task.is_approved = True
+
+            if not task.finished_at:
+                task.finished_at = datetime.utcnow()
+
+        db.commit()
+
+        for task in task_map.values():
+            db.refresh(task)
+
+        return [TaskResponse.model_validate(task_map[item.task_id]) for item in requests]
+    except SQLAlchemyError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"작업 확정 저장 실패: {str(e)}")
 
 
 @router.patch("/{task_id}/approve", response_model=TaskResponse)

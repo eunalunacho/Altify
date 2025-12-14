@@ -22,6 +22,7 @@ class TaskResponse(BaseModel):
     status: TaskStatus
     alt_generated_1: Optional[str] = None
     alt_generated_2: Optional[str] = None
+    selected_alt_index: Optional[int] = None
     created_at: datetime
     finished_at: Optional[datetime] = None
     final_alt: Optional[str] = None

@@ -2,16 +2,19 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import client from '../api/client';
 
 // 블록 타입 정의
-const BLOCK_TYPES = {
-  TEXT: 'text',
-  IMAGE: 'image'
+const EDITOR_STAGE = {
+  EDITING: 'editing',
+  GENERATING: 'generating',
+  FINALIZED: 'finalized'
 };
 
 const BlogEditor = ({ onPublishSuccess }) => {
-  const [isPublished, setIsPublished] = useState(false);
+  const [stage, setStage] = useState(EDITOR_STAGE.EDITING);
   const [imageTasks, setImageTasks] = useState(new Map()); // imageId -> task 정보
   const [isPublishing, setIsPublishing] = useState(false);
   const [, setEditorChangeCount] = useState(0); // 에디터 변경 감지
+  const [prePublishHTML, setPrePublishHTML] = useState('');
+  const [selectedAlts, setSelectedAlts] = useState(new Map()); // imageId -> {choice, text}
   const editorRef = useRef(null);
   const fileInputRef = useRef(null);
   const imageIdCounter = useRef(1);
@@ -21,11 +24,20 @@ const BlogEditor = ({ onPublishSuccess }) => {
   const imageIdToTaskIdRef = useRef(new Map()); // imageId -> taskId 매핑
   const imageDataMapRef = useRef(new Map()); // imageId -> {file, preview} 매핑
   const imageTasksRef = useRef(new Map()); // imageTasks 상태의 최신 값을 ref로도 관리
+  const selectedAltsRef = useRef(new Map());
+
+  const isEditorLocked = stage !== EDITOR_STAGE.EDITING;
+  const isFinalized = stage === EDITOR_STAGE.FINALIZED;
 
   // imageTasks 상태와 ref를 동기화
   useEffect(() => {
     imageTasksRef.current = imageTasks;
   }, [imageTasks]);
+
+  // 선택한 ALT 상태 동기화
+  useEffect(() => {
+    selectedAltsRef.current = selectedAlts;
+  }, [selectedAlts]);
 
   // 이미지 삽입 큐 처리
   const processImageQueue = useCallback(() => {
@@ -83,7 +95,7 @@ const BlogEditor = ({ onPublishSuccess }) => {
       img.style.display = 'block';
       img.contentEditable = false;
 
-      if (!isPublished) {
+      if (!isEditorLocked) {
         img.addEventListener('click', (e) => {
           if (e.ctrlKey || e.metaKey) {
             const targetImageId = img.getAttribute('data-image-id');
@@ -114,7 +126,7 @@ const BlogEditor = ({ onPublishSuccess }) => {
     };
     
     reader.readAsDataURL(file);
-  }, [isPublished]);
+  }, [isEditorLocked]);
 
   // 이미지를 에디터에 삽입 (큐에 추가)
   const insertImageToEditor = (file, imageId) => {
@@ -177,7 +189,7 @@ const BlogEditor = ({ onPublishSuccess }) => {
     if (!editor) return undefined;
 
     const handleEditorInput = () => {
-      if (isPublished) return;
+      if (isEditorLocked) return;
       setEditorChangeCount(prev => prev + 1);
     };
 
@@ -188,7 +200,7 @@ const BlogEditor = ({ onPublishSuccess }) => {
       editor.removeEventListener('input', handleEditorInput);
       editor.removeEventListener('drop', handleEditorInput);
     };
-  }, [isPublished]);
+  }, [isEditorLocked]);
 
   // 드래그 앤 드롭
   const handleDragOver = (e) => {
@@ -199,7 +211,7 @@ const BlogEditor = ({ onPublishSuccess }) => {
   const handleDrop = (e) => {
     e.preventDefault();
     e.stopPropagation();
-    if (isPublished) return;
+    if (isEditorLocked) return;
 
     const file = e.dataTransfer.files[0];
     if (file && file.type.startsWith('image/')) {
@@ -210,7 +222,7 @@ const BlogEditor = ({ onPublishSuccess }) => {
 
   // 텍스트 업데이트
   const handleTextChange = (blockId, content) => {
-    if (isPublished) return;
+    if (isEditorLocked) return;
 
     // 이 함수는 텍스트 블록에 대한 것이므로, 이미지 블록에는 적용되지 않음
     // 이미지 블록의 content는 이미지 데이터를 포함하므로, 텍스트 업데이트는 필요 없음
@@ -218,7 +230,7 @@ const BlogEditor = ({ onPublishSuccess }) => {
 
   // 블록 삭제
   const handleDeleteBlock = (blockId) => {
-    if (isPublished) return;
+    if (isEditorLocked) return;
 
     // 이 함수는 텍스트 블록에 대한 것이므로, 이미지 블록에는 적용되지 않음
     // 이미지 블록은 클릭으로 삭제되므로, 여기서는 처리하지 않음
@@ -333,11 +345,36 @@ const BlogEditor = ({ onPublishSuccess }) => {
     return pairs;
   };
 
-  // ALT 후보 말풍선 업데이트 (imageTasks를 파라미터로 받음)
+  const clearAltDecorations = useCallback(() => {
+    if (!editorRef.current) return;
+    const decorations = editorRef.current.querySelectorAll('.alt-tooltip, .alt-loading-overlay');
+    decorations.forEach((node) => node.remove());
+  }, []);
+
+  const handleAltSelection = useCallback((imageId, choice, text) => {
+    setSelectedAlts(prev => {
+      const updated = new Map(prev);
+      updated.set(imageId, { choice, text: text || '' });
+      return updated;
+    });
+  }, []);
+
+  const handleAltEdit = useCallback((imageId, text) => {
+    setSelectedAlts(prev => {
+      const updated = new Map(prev);
+      const current = updated.get(imageId) || { choice: null, text: '' };
+      updated.set(imageId, { ...current, text });
+      return updated;
+    });
+  }, []);
+
+  // ALT 후보 말풍선 및 로딩 아이콘 업데이트 (imageTasks를 파라미터로 받음)
   const updateAltTooltips = useCallback((currentImageTasks) => {
     if (!editorRef.current) return;
 
     const editor = editorRef.current;
+    clearAltDecorations();
+
     const images = editor.querySelectorAll('img[data-image-id]');
 
     images.forEach((img) => {
@@ -345,73 +382,113 @@ const BlogEditor = ({ onPublishSuccess }) => {
       const task = currentImageTasks.get(imageId);
 
       if (!task) {
-        // 태스크가 없으면 기존 말풍선 제거
-        const existingTooltip = img.parentElement?.querySelector('.alt-tooltip');
-        if (existingTooltip) {
-          existingTooltip.remove();
-        }
         return;
       }
 
       // 기존 말풍선 제거
-      const existingTooltip = img.parentElement?.querySelector('.alt-tooltip');
-      if (existingTooltip) {
-        existingTooltip.remove();
+      const parent = img.parentElement;
+      if (parent) {
+        parent.style.position = 'relative';
       }
 
       // 말풍선 생성
-      if (task.status === 'DONE' && (task.alt1 || task.alt2)) {
-        const tooltip = document.createElement('div');
-        tooltip.className = 'alt-tooltip bg-blue-50 border border-blue-200 rounded-lg p-4 space-y-2 mt-2';
-        tooltip.innerHTML = `
-          <div class="text-sm font-semibold text-blue-800 mb-2">
-            생성된 ALT 텍스트 후보:
+      if (task.status === 'PROCESSING' || task.status === 'PENDING') {
+        const overlay = document.createElement('div');
+        overlay.className = 'alt-loading-overlay absolute inset-0 flex items-start justify-end pointer-events-none';
+        overlay.innerHTML = `
+          <div class="bg-white/80 rounded-full p-2 m-2 shadow-sm border border-yellow-200">
+            <div class="animate-spin rounded-full h-5 w-5 border-b-2 border-yellow-600"></div>
           </div>
-          ${task.alt1 ? `
-            <div class="bg-white rounded p-3 border border-blue-100">
-              <div class="text-xs text-gray-500 mb-1">후보 1</div>
-              <div class="text-gray-800">${task.alt1}</div>
-            </div>
-          ` : ''}
-          ${task.alt2 ? `
-            <div class="bg-white rounded p-3 border border-blue-100">
-              <div class="text-xs text-gray-500 mb-1">후보 2</div>
-              <div class="text-gray-800">${task.alt2}</div>
-            </div>
-          ` : ''}
         `;
         // 이미지 다음에 말풍선 삽입
-        if (img.parentElement) {
-          img.parentElement.insertBefore(tooltip, img.nextSibling);
+        if (parent) {
+          parent.appendChild(overlay);
         }
-      } else if (task.status === 'PROCESSING' || task.status === 'PENDING') {
-        const tooltip = document.createElement('div');
-        tooltip.className = 'alt-tooltip bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-center mt-2';
-        tooltip.innerHTML = `
-          <div class="animate-spin rounded-full h-5 w-5 border-b-2 border-yellow-600 mx-auto mb-2"></div>
-          <div class="text-sm text-yellow-800">ALT 텍스트 생성 중...</div>
-        `;
-        if (img.parentElement) {
-          img.parentElement.insertBefore(tooltip, img.nextSibling);
-        }
-      } else if (task.status === 'FAILED') {
+        return;
+      }
+
+      if (task.status === 'FAILED') {
         const tooltip = document.createElement('div');
         tooltip.className = 'alt-tooltip bg-red-50 border border-red-200 rounded-lg p-3 text-center text-sm text-red-800 mt-2';
         tooltip.textContent = 'ALT 텍스트 생성 실패';
-        if (img.parentElement) {
-          img.parentElement.insertBefore(tooltip, img.nextSibling);
+        if (parent) {
+          parent.insertBefore(tooltip, img.nextSibling);
+        }
+        return;
+      }
+
+      if (task.status === 'DONE' && (task.alt1 || task.alt2)) {
+        const selectedInfo = selectedAltsRef.current.get(imageId);
+        const tooltip = document.createElement('div');
+        tooltip.className = 'alt-tooltip bg-blue-50 border border-blue-200 rounded-lg p-4 space-y-3 mt-2';
+
+        const title = document.createElement('div');
+        title.className = 'text-sm font-semibold text-blue-800';
+        title.textContent = '생성된 ALT 텍스트 후보';
+        tooltip.appendChild(title);
+
+        const candidates = document.createElement('div');
+        candidates.className = 'space-y-2';
+
+        const createCandidate = (index, text) => {
+          const isSelected = selectedInfo?.choice === index;
+          const candidate = document.createElement('div');
+          candidate.className = `flex items-start gap-2 p-3 border rounded-lg cursor-pointer transition ${isSelected ? 'border-primary-500 bg-white shadow-sm' : 'border-gray-200 hover:border-primary-300'}`;
+
+          const icon = document.createElement('div');
+          icon.className = 'text-lg';
+          icon.textContent = index === 1 ? '💬1' : '💬2';
+          candidate.appendChild(icon);
+
+          const content = document.createElement('div');
+          content.className = 'flex-1 text-gray-800 whitespace-pre-wrap';
+          const chosenText = isSelected ? (selectedInfo?.text || text || '') : (text || '');
+          content.textContent = chosenText;
+
+          if (isSelected && !isFinalized) {
+            content.contentEditable = true;
+            content.className += ' outline-none focus:ring-2 focus:ring-primary-500 rounded';
+            content.addEventListener('input', (e) => {
+              handleAltEdit(imageId, e.currentTarget.textContent);
+            });
+            content.addEventListener('click', (e) => e.stopPropagation());
+          }
+
+          candidate.addEventListener('click', () => {
+            handleAltSelection(imageId, index, text || '');
+          });
+
+          candidate.appendChild(content);
+          return candidate;
+        };
+
+        if (task.alt1) {
+          candidates.appendChild(createCandidate(1, task.alt1));
+        }
+        if (task.alt2) {
+          candidates.appendChild(createCandidate(2, task.alt2));
+        }
+
+        tooltip.appendChild(candidates);
+
+        if (parent) {
+          parent.insertBefore(tooltip, img.nextSibling);
         }
       }
     });
-  }, []);
+  }, [clearAltDecorations, handleAltEdit, handleAltSelection, isFinalized]);
 
   // 발행 핸들러
-  const handlePublish = async () => {
+  const startAltGeneration = async () => {
     const pairs = extractImageContextPairs();
 
     if (pairs.length === 0) {
       alert('최소 하나의 이미지가 필요합니다.');
       return;
+    }
+
+    if (editorRef.current) {
+      setPrePublishHTML(editorRef.current.innerHTML);
     }
 
     setIsPublishing(true);
@@ -451,7 +528,8 @@ const BlogEditor = ({ onPublishSuccess }) => {
         
         // 상태 업데이트
         setImageTasks(newImageTasks);
-        setIsPublished(true);
+        setStage(EDITOR_STAGE.GENERATING);
+        setSelectedAlts(new Map());
         
         // 발행 후 에디터 비활성화
         if (editorRef.current) {
@@ -474,9 +552,69 @@ const BlogEditor = ({ onPublishSuccess }) => {
     }
   };
 
+  const finalizeAltSelection = async () => {
+    const imageIdToTaskId = imageIdToTaskIdRef.current;
+    const pendingSelection = Array.from(imageIdToTaskId.keys()).filter((imageId) => {
+      const selection = selectedAltsRef.current.get(imageId);
+      const task = imageTasksRef.current.get(imageId);
+      return !selection || !selection.choice || !task || task.status !== 'DONE';
+    });
+
+    if (pendingSelection.length > 0) {
+      alert('모든 이미지에 대해 ALT 후보를 선택한 뒤 발행해주세요.');
+      return;
+    }
+
+    const payload = Array.from(imageIdToTaskId.entries()).map(([imageId, taskId]) => {
+      const selection = selectedAltsRef.current.get(imageId);
+      const task = imageTasksRef.current.get(imageId);
+      const baseText = selection.choice === 1 ? task?.alt1 : task?.alt2;
+      const finalText = (selection.text || baseText || '').trim();
+      return {
+        task_id: taskId,
+        selected_alt_index: selection.choice,
+        final_alt: finalText
+      };
+    });
+
+    setIsPublishing(true);
+    try {
+      await client.post('/tasks/finalize', payload);
+      setStage(EDITOR_STAGE.FINALIZED);
+
+      if (editorRef.current) {
+        editorRef.current.contentEditable = false;
+        const images = editorRef.current.querySelectorAll('img[data-image-id]');
+        images.forEach((img) => {
+          const selection = selectedAltsRef.current.get(img.getAttribute('data-image-id'));
+          if (selection?.text) {
+            img.alt = selection.text;
+          }
+        });
+      }
+
+      setTimeout(() => {
+        updateAltTooltips(imageTasksRef.current);
+      }, 0);
+    } catch (error) {
+      console.error('최종 발행 오류:', error);
+    } finally {
+      setIsPublishing(false);
+    }
+  };
+
+  // 발행 핸들러
+  const handlePublish = async () => {
+    if (stage === EDITOR_STAGE.EDITING) {
+      await startAltGeneration();
+    } else if (stage === EDITOR_STAGE.GENERATING) {
+      await finalizeAltSelection();
+    }
+  };
+
   // 작업 상태 폴링 (발행 후 자동 시작)
   useEffect(() => {
-    if (!isPublished || imageTasks.size === 0) return;
+    if (stage !== EDITOR_STAGE.GENERATING || imageTasks.size === 0) return;
 
     let pollInterval = null;
     let isPolling = true;
@@ -574,14 +712,62 @@ const BlogEditor = ({ onPublishSuccess }) => {
         clearInterval(pollInterval);
       }
     };
-  }, [isPublished, updateAltTooltips]); // updateAltTooltips를 의존성에 추가
+  }, [imageTasks.size, stage, updateAltTooltips]);
 
-  // imageTasks 변경 시 말풍선 업데이트 (추가 안전장치)
+  // imageTasks/선택 변경 시 말풍선 업데이트 (추가 안전장치)
   useEffect(() => {
-    if (isPublished && imageTasks.size > 0) {
+    if (stage !== EDITOR_STAGE.EDITING && imageTasks.size > 0) {
       updateAltTooltips(imageTasks);
     }
-  }, [imageTasks, isPublished, updateAltTooltips]);
+  }, [imageTasks, selectedAlts, stage, updateAltTooltips]);
+
+  const handleResetToDraft = () => {
+    if (!editorRef.current) return;
+
+    editorRef.current.innerHTML = prePublishHTML;
+    editorRef.current.contentEditable = true;
+    setStage(EDITOR_STAGE.EDITING);
+    setImageTasks(new Map());
+    setSelectedAlts(new Map());
+    imageIdToTaskIdRef.current = new Map();
+    clearAltDecorations();
+
+    setTimeout(() => {
+      const images = editorRef.current.querySelectorAll('img[data-image-id]');
+      images.forEach((img) => {
+        img.addEventListener('click', (e) => {
+          if (e.ctrlKey || e.metaKey) {
+            const targetImageId = img.getAttribute('data-image-id');
+            img.remove();
+            imageDataMapRef.current.delete(targetImageId);
+          }
+        });
+      });
+    }, 0);
+  };
+
+  const hasImageContextPairs = extractImageContextPairs().length > 0;
+  const allTasksCompleted = imageTasks.size > 0 && Array.from(imageTasks.values()).every(task => task.status === 'DONE');
+  const allSelectionsMade = allTasksCompleted && Array.from(imageIdToTaskIdRef.current.keys()).every((imageId) => {
+    const selection = selectedAltsRef.current.get(imageId);
+    const task = imageTasksRef.current.get(imageId);
+
+    if (!selection || !selection.choice) return false;
+
+    const baseText = selection.choice === 1 ? task?.alt1 : task?.alt2;
+    return Boolean((selection.text || baseText || '').trim());
+  });
+
+  const publishDisabled = isPublishing
+    || stage === EDITOR_STAGE.FINALIZED
+    || (stage === EDITOR_STAGE.EDITING && !hasImageContextPairs)
+    || (stage === EDITOR_STAGE.GENERATING && (!allTasksCompleted || !allSelectionsMade));
+
+  const publishLabel = stage === EDITOR_STAGE.GENERATING
+    ? '최종 발행'
+    : stage === EDITOR_STAGE.FINALIZED
+      ? '발행 완료'
+      : '발행';
 
   return (
     <div className="w-full max-w-4xl mx-auto p-6">
@@ -591,7 +777,7 @@ const BlogEditor = ({ onPublishSuccess }) => {
           <h2 className="text-2xl font-bold text-gray-800">블로그 글 작성</h2>
           <div className="flex items-center gap-4">
             {/* 이미지 추가 버튼 */}
-            {!isPublished && (
+            {stage === EDITOR_STAGE.EDITING && (
               <label className="cursor-pointer inline-flex items-center px-4 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors">
                 <svg
                   className="w-5 h-5 mr-2 text-gray-600"
@@ -616,12 +802,21 @@ const BlogEditor = ({ onPublishSuccess }) => {
                 />
               </label>
             )}
+            {stage === EDITOR_STAGE.GENERATING && (
+              <button
+                onClick={handleResetToDraft}
+                className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg border border-gray-300 hover:bg-gray-200 transition-colors"
+                disabled={isPublishing}
+              >
+                수정
+              </button>
+            )}
             <button
               onClick={handlePublish}
-              disabled={isPublishing || isPublished || extractImageContextPairs().length === 0}
+              disabled={publishDisabled}
               className="px-6 py-2 bg-green-600 text-white font-semibold rounded-lg hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
             >
-              {isPublishing ? '발행 중...' : '발행'}
+              {isPublishing ? '처리 중...' : publishLabel}
             </button>
           </div>
         </div>
@@ -630,7 +825,7 @@ const BlogEditor = ({ onPublishSuccess }) => {
         <div className="p-6">
           <div
             ref={editorRef}
-            contentEditable={!isPublished}
+            contentEditable={stage === EDITOR_STAGE.EDITING}
             onDragOver={handleDragOver}
             onDrop={handleDrop}
             className="min-h-[600px] p-4 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none prose max-w-none"
@@ -641,9 +836,9 @@ const BlogEditor = ({ onPublishSuccess }) => {
             suppressContentEditableWarning={true}
             data-placeholder="글을 작성하세요..."
           />
-          {!isPublished && (
+          {stage === EDITOR_STAGE.EDITING && (
             <p className="text-sm text-gray-500 mt-2 px-4">
-              💡 이미지를 드래그 앤 드롭하거나 위의 '이미지 추가' 버튼을 사용하세요. 
+              💡 이미지를 드래그 앤 드롭하거나 위의 '이미지 추가' 버튼을 사용하세요.
               이미지 삭제: Ctrl/Cmd + 클릭
             </p>
           )}

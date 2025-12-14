@@ -28,6 +28,8 @@ class Task(Base):
     alt_generated_1 = Column(String, nullable=True)
     alt_generated_2 = Column(String, nullable=True)
 
+    selected_alt_index = Column(Integer, nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     finished_at = Column(DateTime(timezone=True), nullable=True)
 
