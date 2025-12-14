@@ -11,6 +11,7 @@ const BlogEditor = ({ onPublishSuccess }) => {
   const [isPublished, setIsPublished] = useState(false);
   const [imageTasks, setImageTasks] = useState(new Map()); // imageId -> task 정보
   const [isPublishing, setIsPublishing] = useState(false);
+  const [, setEditorChangeCount] = useState(0); // 에디터 변경 감지
   const editorRef = useRef(null);
   const fileInputRef = useRef(null);
   const imageIdCounter = useRef(1);
@@ -108,6 +109,7 @@ const BlogEditor = ({ onPublishSuccess }) => {
 
       // 다음 항목 처리
       isProcessingQueue.current = false;
+      setEditorChangeCount(prev => prev + 1);
       processImageQueue();
     };
     
@@ -168,6 +170,25 @@ const BlogEditor = ({ onPublishSuccess }) => {
       fileInputRef.current.value = '';
     }
   };
+
+  // 에디터 입력 이벤트 감지 (텍스트 변경 시 리렌더링 유도)
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return undefined;
+
+    const handleEditorInput = () => {
+      if (isPublished) return;
+      setEditorChangeCount(prev => prev + 1);
+    };
+
+    editor.addEventListener('input', handleEditorInput);
+    editor.addEventListener('drop', handleEditorInput);
+
+    return () => {
+      editor.removeEventListener('input', handleEditorInput);
+      editor.removeEventListener('drop', handleEditorInput);
+    };
+  }, [isPublished]);
 
   // 드래그 앤 드롭
   const handleDragOver = (e) => {
