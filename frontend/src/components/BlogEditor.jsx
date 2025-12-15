@@ -508,16 +508,18 @@ const BlogEditor = ({ onPublishSuccess }) => {
         },
       });
 
-      if (response.data && response.data.tasks) {
+      const tasks = Array.isArray(response.data) ? response.data : response.data?.tasks;
+
+      if (tasks && tasks.length > 0) {
         // 각 이미지에 task 정보 매핑
         const newImageTasks = new Map();
         const newImageIdToTaskId = new Map();
         pairs.forEach((pair, index) => {
-          if (response.data.tasks[index]) {
-            const taskId = response.data.tasks[index].id;
+          if (tasks[index]) {
+            const taskId = tasks[index].id;
             newImageTasks.set(pair.imageId, {
               taskId: taskId,
-              status: response.data.tasks[index].status,
+              status: tasks[index].status,
               alt1: null,
               alt2: null
             });
@@ -542,7 +544,7 @@ const BlogEditor = ({ onPublishSuccess }) => {
         }, 0);
 
         if (onPublishSuccess) {
-          onPublishSuccess(response.data.tasks);
+           onPublishSuccess(tasks);
         }
       }
     } catch (error) {
