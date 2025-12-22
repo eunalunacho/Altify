@@ -1,17 +1,76 @@
+
+
+
+
 # Python-generated files
 __pycache__/
 *.py[oc]
+*.pyc
+*.pyo
+*.pyd
+.Python
 build/
 dist/
 wheels/
 *.egg-info
+*.egg
 
 # Virtual environments
 .venv
+venv/
+ENV/
+env/
 
+# Environment variables
 .env
+.env.local
+.env.*.local
 
 # Frontend artifacts
 node_modules/
 frontend/node_modules/
 frontend/dist/
+frontend/.vite/
+frontend/.vite-cache/
+
+# Test results and reports
+test_results_*.json
+*.log
+*.log.*
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.vs/
+*.sublime-project
+*.sublime-workspace
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# Python testing and coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.hypothesis/
+
+# unused files
+# frontend
+UploadForm.jsx
+# test
+00_integration_test_suite.py
+TEST_REVIEW_SUMMARY.md

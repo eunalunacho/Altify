@@ -90,6 +90,8 @@ def save_result(task_id: int, alt_text: str, alt_text2: str = None) -> bool:
     """
     생성된 ALT 텍스트를 Task에 저장
     
+    사용자가 선택하지 않을 경우 기본적으로 1번 문장을 선택하도록 설정
+    
     Args:
         task_id: Task ID
         alt_text: 첫 번째 생성된 ALT 텍스트
@@ -108,11 +110,16 @@ def save_result(task_id: int, alt_text: str, alt_text2: str = None) -> bool:
         task.alt_generated_1 = alt_text
         if alt_text2:
             task.alt_generated_2 = alt_text2
+        
+        # 기본값으로 1번 문장 선택 (사용자가 선택하지 않을 경우)
+        task.selected_alt_index = 1
+        task.final_alt = alt_text  # 기본값으로 첫 번째 ALT 텍스트 설정
+        
         task.status = TaskStatus.DONE
         task.finished_at = datetime.utcnow()
         
         db.commit()
-        logger.info(f"Task {task_id} 결과 저장 완료 (ALT 2개)")
+        logger.info(f"Task {task_id} 결과 저장 완료 (ALT 2개, 기본값: 1번 문장 선택)")
         return True
         
     except SQLAlchemyError as e:

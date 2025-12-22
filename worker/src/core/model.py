@@ -41,7 +41,7 @@ class LLaVAModelLoader:
             self._processor = AutoProcessor.from_pretrained(model_id)
             logger.info("[2/4] Processor 로딩 완료 (%.1fs)", time.time() - t0)
 
-            # 2) Quantization config (이건 빠름)
+            # 3) Quantization config 
             logger.info("[3/4] 4-bit 양자화 설정 생성")
             quantization_config = BitsAndBytesConfig(
                 load_in_4bit=True,
@@ -51,7 +51,7 @@ class LLaVAModelLoader:
             )
             logger.info("[3/4] 양자화 설정 생성 완료")
 
-            # 3) Model (여기가 오래 걸림)
+            # 4) Model
             logger.info("[4/4] Model 다운로드/로딩 시작 (수 분 걸릴 수 있음)")
             t1 = time.time()
             self._model = LlavaForConditionalGeneration.from_pretrained(
@@ -70,7 +70,7 @@ class LLaVAModelLoader:
             logger.error(f"모델 로딩 실패: {str(e)}", exc_info=True)
             raise
     
-    def _resize_for_llava(self, image: Image.Image, max_side: int = 896) -> Image.Image:
+    def _resize_for_llava(self, image: Image.Image, max_side: int = 672) -> Image.Image:
         """너무 큰 이미지는 강제 축소해서 GPU/드라이버 리셋(TDR) 방지"""
         w, h = image.size
         m = max(w, h)
@@ -98,7 +98,7 @@ class LLaVAModelLoader:
             raise RuntimeError("모델이 로드되지 않았습니다. load()를 먼저 호출하세요.")
         
         # 이미지 리사이즈 
-        image = self._resize_for_llava(image, max_side=896)  # 768~1024 사이로 조절 추천
+        image = self._resize_for_llava(image, max_side=672)  
 
         context_block = f"Context (supporting hint, do not quote): {context}"
         prompt_common = (
@@ -109,7 +109,7 @@ class LLaVAModelLoader:
             "Background Details, Data Documents\n"
             "- Input consists of:\n"
             "  (1) an image\n"
-            "  (2) an accompanying text (context) written by a human.\n"
+            "  (2) keywords extracted from text written by a human.\n"
             "- The image is the primary source of truth.\n"
             "- The context is only a supporting hint and must NOT be quoted or copied.\n"
             "- Never complete the sentence based primarily on the context.\n"
@@ -175,14 +175,20 @@ class LLaVAModelLoader:
         ).to(self._model.device)
         
         # 생성 파라미터 설정 (메모리 효율성을 위해 제한)
+        # temperature가 0.5 이상일 때만 do_sample=True로 설정 (그 외는 greedy decoding)
+        use_sampling = temperature >= 0.5
         generation_config = {
             "max_new_tokens": 60,
-            "do_sample": False,
-            "num_beams": 1,
+            "do_sample": use_sampling,
+            "temperature": temperature if use_sampling else None,
+            "num_beams": 1 if use_sampling else 1,
             "repetition_penalty": 1.1,
             "pad_token_id": self._processor.tokenizer.eos_token_id,
             "eos_token_id": self._processor.tokenizer.eos_token_id,
         }
+        # do_sample이 False일 때 temperature 파라미터 제거
+        if not use_sampling:
+            generation_config.pop("temperature", None)
         
 
         try:
@@ -224,6 +230,40 @@ class LLaVAModelLoader:
             torch.cuda.empty_cache()
             raise RuntimeError("GPU 메모리 부족으로 생성에 실패했습니다.")  
     
+    def _is_alt_similar_to_context(self, alt_text: str, context: str) -> bool:
+        """
+        생성된 ALT 텍스트가 사용자 문맥의 일부와 동일한지 확인
+        
+        Args:
+            alt_text: 생성된 ALT 텍스트
+            context: 사용자가 작성한 원본 문맥 텍스트
+        
+        Returns:
+            ALT가 문맥의 일부와 동일하면 True
+        """
+        if not alt_text or not context:
+            return False
+        
+        # 공백 정리
+        alt_clean = alt_text.strip()
+        context_clean = context.strip()
+        
+        # ALT 텍스트가 문맥에 포함되어 있는지 확인
+        if alt_clean in context_clean:
+            return True
+        
+        # ALT 텍스트의 주요 부분(단어들)이 문맥에 포함되어 있는지 확인
+        # ALT 텍스트를 단어로 분리하여 확인
+        alt_words = alt_clean.split()
+        if len(alt_words) >= 3:  # 3개 이상의 단어가 있으면
+            # ALT 텍스트의 연속된 단어들이 문맥에 포함되어 있는지 확인
+            for i in range(len(alt_words) - 2):
+                phrase = ' '.join(alt_words[i:i+3])  # 3개 단어씩 묶어서 확인
+                if phrase in context_clean:
+                    return True
+        
+        return False
+    
     def generate_captions(self, image: Image.Image, context: str) -> tuple[str, str]:
         """
         이미지와 문맥을 기반으로 2개의 ALT 텍스트 후보 생성
@@ -235,11 +275,41 @@ class LLaVAModelLoader:
         Returns:
             (첫 번째 ALT, 두 번째 ALT) 튜플
         """
-        # 첫 번째 ALT: 기본 temperature (0.7)
-        alt1 = self.generate_caption(image, context, temperature=0.7, prompt_variant=1)
+        # 이미지 복사본 생성 (두 번째 생성 시 원본 이미지 재사용 방지)
+        import copy
+        image_copy = copy.deepcopy(image)
         
-        # 두 번째 ALT: 더 높은 temperature (0.9)로 다양성 증가, 다른 프롬프트 사용
-        alt2 = self.generate_caption(image, context, temperature=0.9, prompt_variant=2)
+        # 첫 번째 ALT: 낮은 temperature (0.2)로 안정적인 생성, greedy decoding 사용
+        alt1 = self.generate_caption(image, context, temperature=0.2, prompt_variant=1)
+        
+        # 생성된 ALT가 문맥의 일부와 동일한지 확인하고 재생성
+        max_context_retries = 3
+        context_retry_count = 0
+        while self._is_alt_similar_to_context(alt1, context) and context_retry_count < max_context_retries:
+            logger.warning(f"ALT 1이 사용자 문맥과 유사합니다. 재생성 시도 {context_retry_count + 1}/{max_context_retries}")
+            alt1 = self.generate_caption(image, context, temperature=0.3 + (context_retry_count * 0.1), prompt_variant=1)
+            context_retry_count += 1
+        
+        # 두 번째 ALT: 첫 번째보다 약간 높은 temperature (0.3)로 다양성 증가, 다른 프롬프트 사용
+        # 이미지 복사본 사용하여 첫 번째 생성의 영향 최소화
+        # temperature 0.3은 0.5 미만이므로 greedy decoding 사용
+        alt2 = self.generate_caption(image_copy, context, temperature=0.3, prompt_variant=2)
+        
+        # 생성된 ALT가 문맥의 일부와 동일한지 확인하고 재생성
+        context_retry_count = 0
+        while self._is_alt_similar_to_context(alt2, context) and context_retry_count < max_context_retries:
+            logger.warning(f"ALT 2가 사용자 문맥과 유사합니다. 재생성 시도 {context_retry_count + 1}/{max_context_retries}")
+            alt2 = self.generate_caption(image_copy, context, temperature=0.4 + (context_retry_count * 0.1), prompt_variant=2)
+            context_retry_count += 1
+        
+        # 두 ALT가 동일한 경우 재생성 시도 (최대 2회)
+        max_retries = 2
+        retry_count = 0
+        while alt1 == alt2 and retry_count < max_retries:
+            logger.warning(f"ALT 1과 ALT 2가 동일합니다. 재생성 시도 {retry_count + 1}/{max_retries}")
+            # temperature를 더 높여서 재생성
+            alt2 = self.generate_caption(image_copy, context, temperature=0.5, prompt_variant=2)
+            retry_count += 1
         
         return (alt1, alt2)
     

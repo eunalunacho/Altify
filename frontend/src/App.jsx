@@ -65,7 +65,7 @@ function App() {
               <h1 className="text-2xl font-bold text-gray-800">Altify</h1>
             </div>
             <p className="text-sm text-gray-600 hidden sm:block">
-              시각 장애인을 위한 ALT 텍스트 생성 플랫폼
+              ALT 텍스트 생성 플랫폼
             </p>
             {view !== 'blog' && (
               <button
@@ -109,7 +109,7 @@ function App() {
       <footer className="bg-white border-t border-gray-200 mt-12">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
           <p className="text-center text-sm text-gray-600">
-            © 2024 Altify. 시각 장애인을 위한 접근성 향상을 위해 노력합니다.
+            © 2025 Altify.
           </p>
         </div>
       </footer>

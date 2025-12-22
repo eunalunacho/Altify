@@ -99,7 +99,7 @@ services:
     build:
       context: ./worker
       dockerfile: Dockerfile
-    container_name: altify-worker
+    # container_name: altify-worker
     env_file:
       - .env
     environment:

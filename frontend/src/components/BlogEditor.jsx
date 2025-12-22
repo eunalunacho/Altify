@@ -25,6 +25,8 @@ const BlogEditor = ({ onPublishSuccess }) => {
   const imageDataMapRef = useRef(new Map()); // imageId -> {file, preview} 매핑
   const imageTasksRef = useRef(new Map()); // imageTasks 상태의 최신 값을 ref로도 관리
   const selectedAltsRef = useRef(new Map());
+  const editingElementsRef = useRef(new Map()); // imageId -> {element, choice} 편집 중인 요소 추적
+  const lastUpdateTimeRef = useRef(0); // 마지막 tooltip 업데이트 시간 추적 (중복 호출 방지)
 
   const isEditorLocked = stage !== EDITOR_STAGE.EDITING;
   const isFinalized = stage === EDITOR_STAGE.FINALIZED;
@@ -373,10 +375,28 @@ const BlogEditor = ({ onPublishSuccess }) => {
     if (!editorRef.current) return;
 
     const editor = editorRef.current;
+    
+    // 편집 중인 요소의 내용 저장 (tooltip 제거 전에)
+    const editingInfo = new Map(); // imageId -> {text, choice}
+    const images = editor.querySelectorAll('img[data-image-id]');
+    
+    images.forEach((img) => {
+      const imageId = img.getAttribute('data-image-id');
+      const editingData = editingElementsRef.current.get(imageId);
+      if (editingData && editingData.element && document.contains(editingData.element)) {
+        // 편집 중인 요소가 있고 아직 DOM에 있으면 내용 저장
+        const currentText = editingData.element.textContent || '';
+        editingInfo.set(imageId, {
+          text: currentText,
+          choice: editingData.choice
+        });
+      }
+    });
+
+    // 모든 tooltip 제거 (이전 코드 방식)
     clearAltDecorations();
 
-    const images = editor.querySelectorAll('img[data-image-id]');
-
+    // 모든 이미지에 대해 tooltip 생성
     images.forEach((img) => {
       const imageId = img.getAttribute('data-image-id');
       const task = currentImageTasks.get(imageId);
@@ -385,7 +405,6 @@ const BlogEditor = ({ onPublishSuccess }) => {
         return;
       }
 
-      // 기존 말풍선 제거
       const parent = img.parentElement;
       if (parent) {
         parent.style.position = 'relative';
@@ -419,6 +438,8 @@ const BlogEditor = ({ onPublishSuccess }) => {
 
       if (task.status === 'DONE' && (task.alt1 || task.alt2)) {
         const selectedInfo = selectedAltsRef.current.get(imageId);
+        const savedEditingInfo = editingInfo.get(imageId);
+        
         const tooltip = document.createElement('div');
         tooltip.className = 'alt-tooltip bg-blue-50 border border-blue-200 rounded-lg p-4 space-y-3 mt-2';
 
@@ -442,19 +463,55 @@ const BlogEditor = ({ onPublishSuccess }) => {
 
           const content = document.createElement('div');
           content.className = 'flex-1 text-gray-800 whitespace-pre-wrap';
-          const chosenText = isSelected ? (selectedInfo?.text || text || '') : (text || '');
+          
+          // 편집 중이었던 내용이 있으면 그것을 사용, 없으면 선택된 텍스트 사용
+          let chosenText = text || '';
+          if (isSelected) {
+            if (savedEditingInfo && savedEditingInfo.choice === index) {
+              chosenText = savedEditingInfo.text;
+            } else if (selectedInfo?.text) {
+              chosenText = selectedInfo.text;
+            }
+          }
           content.textContent = chosenText;
 
           if (isSelected && !isFinalized) {
             content.contentEditable = true;
             content.className += ' outline-none focus:ring-2 focus:ring-primary-500 rounded';
-            content.addEventListener('input', (e) => {
-              handleAltEdit(imageId, e.currentTarget.textContent);
+            
+            // 편집 중인 요소 추적
+            editingElementsRef.current.set(imageId, {
+              element: content,
+              choice: index
             });
+            
+            // blur 이벤트: 다른 곳 클릭 시에도 내용 저장
+            content.addEventListener('blur', (e) => {
+              const currentText = e.currentTarget.textContent || '';
+              handleAltEdit(imageId, currentText);
+            });
+            
+            content.addEventListener('input', (e) => {
+              const currentText = e.currentTarget.textContent || '';
+              handleAltEdit(imageId, currentText);
+            });
+            
             content.addEventListener('click', (e) => e.stopPropagation());
+            
+            // focus 이벤트: 포커스 시 편집 중인 요소로 표시
+            content.addEventListener('focus', () => {
+              editingElementsRef.current.set(imageId, {
+                element: content,
+                choice: index
+              });
+            });
           }
 
-          candidate.addEventListener('click', () => {
+          candidate.addEventListener('click', (e) => {
+            // contentEditable 요소를 클릭한 경우는 무시
+            if (e.target === content && content.contentEditable === 'true') {
+              return;
+            }
             handleAltSelection(imageId, index, text || '');
           });
 
@@ -679,11 +736,17 @@ const BlogEditor = ({ onPublishSuccess }) => {
           });
 
           // 업데이트가 있으면 말풍선도 업데이트
+          // 단, 이미 말풍선이 표시된 경우 중복 생성 방지
           if (hasUpdates) {
             // 상태 업데이트 후 DOM 업데이트를 위해 setTimeout 사용
+            // 중복 호출 방지를 위해 짧은 지연 추가
             setTimeout(() => {
-              updateAltTooltips(updatedImageTasks);
-            }, 0);
+              const now = Date.now();
+              if (now - lastUpdateTimeRef.current >= 500) {
+                lastUpdateTimeRef.current = now;
+                updateAltTooltips(updatedImageTasks);
+              }
+            }, 100);
           }
 
           return hasUpdates ? updatedImageTasks : prevTasks;
@@ -717,8 +780,15 @@ const BlogEditor = ({ onPublishSuccess }) => {
   }, [imageTasks.size, stage, updateAltTooltips]);
 
   // imageTasks/선택 변경 시 말풍선 업데이트 (추가 안전장치)
+  // 단, 폴링 중이 아닐 때만 실행 (중복 호출 방지)
   useEffect(() => {
     if (stage !== EDITOR_STAGE.EDITING && imageTasks.size > 0) {
+      const now = Date.now();
+      // 최근 1초 이내에 업데이트가 있었으면 스킵 (중복 호출 방지)
+      if (now - lastUpdateTimeRef.current < 1000) {
+        return;
+      }
+      lastUpdateTimeRef.current = now;
       updateAltTooltips(imageTasks);
     }
   }, [imageTasks, selectedAlts, stage, updateAltTooltips]);
